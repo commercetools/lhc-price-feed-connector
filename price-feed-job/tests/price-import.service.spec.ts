@@ -104,3 +104,20 @@ describe('the report drives the exit code', () => {
     expect(r).toMatchObject({ total: 3, imported: 1, failed: 1, pending: 1 });
   });
 });
+
+describe('reporting only this run', () => {
+  it('ignores earlier runs’ operations for the same keys when the Import API returns operation ids', async () => {
+    const post = vi.fn(() => ({ execute: async () => ({ body: { operationStatus: [{ operationId: 'op-new', state: 'processing' }] } }) }));
+    const opsGet = vi.fn(() => ({ execute: async () => ({ body: { results: [
+      { id: 'op-old', resourceKey: 'CARM-023-EUR-DE', state: 'imported' },   // yesterday's run, same key
+      { id: 'op-new', resourceKey: 'CARM-023-EUR-DE', state: 'imported' },   // this run
+    ] } }) }));
+    const root = {
+      prices: () => ({ importContainers: () => ({ withImportContainerKeyValue: () => ({ post }) }) }),
+      importContainers: () => ({ withImportContainerKeyValue: () => ({ importOperations: () => ({ get: opsGet }) }) }),
+    } as never;
+    const r = await importPrices(root, 'lhc-price-feed', [ROW], KEYS, POLL);
+    expect(r.total).toBe(1);
+    expect(r.imported).toBe(1);
+  });
+});

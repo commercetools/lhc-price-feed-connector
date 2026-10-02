@@ -82,6 +82,7 @@ export async function importPrices(
       });
   }
 
+  const submittedIds = new Set<string>();
   for (const batch of chunk(submittable, MAX_ROWS_PER_REQUEST)) {
     const resources = batch.map((row) => {
       const key = keys.get(row.sku)!;
@@ -101,18 +102,23 @@ export async function importPrices(
       };
     });
 
-    await importApiRoot
+    const { body } = await importApiRoot
       .prices()
       .importContainers()
       .withImportContainerKeyValue({ importContainerKey: containerKey })
       .post({ body: { type: 'price', resources } })
       .execute();
+    // The response names the ImportOperations THIS request created. Poll only those: the container
+    // also holds every earlier run's operations for the same price keys.
+    for (const op of (body as { operationStatus?: Array<{ operationId?: string }> })?.operationStatus ?? []) {
+      if (op.operationId) submittedIds.add(op.operationId);
+    }
     logger.info('Batch submitted', { containerKey, rows: resources.length });
   }
 
   // A 2xx from the Import API is an ACKNOWLEDGEMENT, not a result: the work happens asynchronously and
   // the ImportOperations carry the outcome. A job that stops at the 2xx reports success it cannot know.
-  const settled = await pollOperations(importApiRoot, containerKey, submittable.map(priceKeyFor), poll);
+  const settled = await pollOperations(importApiRoot, containerKey, submittable.map(priceKeyFor), poll, submittedIds);
   return report(containerKey, [...unresolved, ...settled]);
 }
 
@@ -120,7 +126,8 @@ async function pollOperations(
   importApiRoot: ImportApiRoot,
   containerKey: string,
   expectedKeys: string[],
-  poll: { timeoutSeconds: number; intervalSeconds: number; sleep?: (ms: number) => Promise<void> }
+  poll: { timeoutSeconds: number; intervalSeconds: number; sleep?: (ms: number) => Promise<void> },
+  submittedIds: Set<string> = new Set()
 ): Promise<RowOutcome[]> {
   if (expectedKeys.length === 0) return [];
   const sleep = poll.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
@@ -137,6 +144,8 @@ async function pollOperations(
 
     outcomes = body.results
       .filter((op) => op.resourceKey && expectedKeys.includes(op.resourceKey))
+      // This run's operations only, when the Import API told us their ids; otherwise fall back to keys.
+      .filter((op) => submittedIds.size === 0 || submittedIds.has(op.id))
       .map((op) => ({
         sku: skuFromPriceKey(op.resourceKey),
         priceKey: op.resourceKey,
