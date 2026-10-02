@@ -1,0 +1,32 @@
+{
+  "name": "price-feed-job",
+  "version": "1.0.0",
+  "description": "LHC nightly price feed: a CSV file -> the Import API, on a Connect cron schedule. Storefront-agnostic (BFF or Commerce Integration Layer).",
+  "main": "dist/index.js",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "once": "node dist/cli.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@commercetools/platform-sdk": "^8.3.0",
+    "@commercetools/ts-client": "^4.0.0",
+    "dotenv": "^16.4.5",
+    "@commercetools/importapi-sdk": "^6.0.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.0",
+    "@types/express": "^4.17.21"
+  }
+}

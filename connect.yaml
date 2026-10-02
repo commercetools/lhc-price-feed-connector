@@ -1,0 +1,96 @@
+# The LHC price-feed connector: one Connect JOB application that imports a CSV price file through the
+# Import API on a schedule.
+#
+# Split out of the Sessions 8-9 connector so it can be installed ON ITS OWN, with its own least-privilege
+# API client, on any project. It is storefront-agnostic: it writes prices to the platform, and every
+# client (a custom BFF, the Commerce Integration Layer, the Merchant Center) reads them from there.
+#
+# Three rules that catch everyone once:
+#   1. `name` MUST match the application's folder in this repository.
+#   2. A job is still an HTTP app: the scheduler POSTs to `endpoint` on every cron tick and expects 200.
+#   3. `securedConfiguration` is write-only: entered once at install, never displayed again.
+deployAs:
+  - name: price-feed-job
+    applicationType: job
+    endpoint: /price-feed
+    properties:
+      schedule: '0 2 * * *' # 02:00 daily — overridable per deployment
+    configuration:
+      standardConfiguration:
+        - key: FEED_URL
+          description: >-
+            https:// URL of the price CSV (header row: sku,currency,country,amount). An S3 / Azure Blob /
+            GCS object, an SFTP gateway, or the raw samples/prices.csv of this repository for the course.
+          required: true
+        - key: FEED_SOURCE
+          description: csv (default) or custom-object (a { rows } document in FEED_CONTAINER/FEED_KEY, for rooms with no file host).
+          required: false
+          default: 'csv'
+        - key: IMPORT_CONTAINER_KEY
+          description: ImportContainer (resourceType price) the feed is posted into.
+          required: false
+          default: 'lhc-price-feed'
+        - key: FEED_CONTAINER
+          description: Custom Object container for the run lock and the last-run record.
+          required: false
+          default: 'lhc-price-feed'
+        - key: FEED_KEY
+          description: Custom Object key of the feed document — only used when FEED_SOURCE=custom-object.
+          required: false
+          default: 'pending'
+        - key: SKIP_UNCHANGED_FEED
+          description: Skip a run whose file is byte-identical to the last fully successful import.
+          required: false
+          default: 'true'
+        - key: DRY_RUN
+          description: Read, validate and resolve keys, then report — submit nothing.
+          required: false
+          default: 'false'
+        - key: FEED_TIMEOUT_SECONDS
+          description: How long to wait for the file host.
+          required: false
+          default: '30'
+        - key: MAX_FEED_BYTES
+          description: Refuse a feed larger than this.
+          required: false
+          default: '5242880'
+        - key: LOCK_STALE_MINUTES
+          description: >-
+            A job has no concurrency guard from the platform, so this one locks. A lock older than this
+            is assumed abandoned and taken over.
+          required: false
+          default: '45'
+        - key: POLL_TIMEOUT_SECONDS
+          description: How long to wait for ImportOperations to settle before reporting what is pending.
+          required: false
+          default: '120'
+        - key: POLL_INTERVAL_SECONDS
+          description: Delay between ImportOperation polls.
+          required: false
+          default: '5'
+        - key: CTP_IMPORT_URL
+          description: >-
+            Import API host. Derived from CTP_API_URL when blank (the Import API is a separate service
+            on its own host).
+          required: false
+        - key: LOG_LEVEL
+          description: debug | info | warn | error
+          required: false
+          default: 'info'
+      securedConfiguration:
+        - key: FEED_AUTH_HEADER
+          description: >-
+            Optional Authorization header value for a protected file host (e.g. "Bearer …"). Leave empty
+            for a public or pre-signed URL.
+          required: false
+
+# Credentials are NOT asked for at install time. Declaring apiClient.scopes makes Connect GENERATE an API
+# Client holding exactly these scopes and inject CTP_CLIENT_ID / CTP_CLIENT_SECRET / CTP_SCOPE /
+# CTP_PROJECT_KEY / CTP_API_URL / CTP_AUTH_URL at runtime. One application, so this is its exact list.
+inheritAs:
+  apiClient:
+    scopes:
+      - view_products              # resolve SKU -> product/variant keys
+      - manage_products            # the price import writes products
+      - manage_import_containers   # submit and poll import operations
+      - manage_key_value_documents # the run lock and the last-run record (and the custom-object feed)
