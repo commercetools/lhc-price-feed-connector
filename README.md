@@ -25,7 +25,7 @@ TypeScript only for now. A Java version of the same connector, for reference, co
 Connect deploys a **GitHub repository at a git tag**, and **`connect.yaml` must be at the repository
 root**. This connector is authored in the course build repo (`courses/b2c-dev/code/price-feed-connector/`) and synced
 with `./sync-connector.sh <repo>`
-to [`sphere-price-feed-connector-2026`](https://github.com/commercetools/sphere-price-feed-connector-2026), the same model as the Sessions 8–9 connector.
+to [`lhc-price-feed-connector`](https://github.com/commercetools/lhc-price-feed-connector), the same model as the Sessions 8–9 connector.
 
 ## The feed
 
