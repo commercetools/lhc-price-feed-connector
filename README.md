@@ -1,7 +1,7 @@
 # LHC Price-Feed Connector: commercetools Connect *(Import API, on a schedule)*
 
 One Connect **job** application: every night it reads a **CSV price file** and imports it through the
-**Import API**. It's split out of the Sessions 8–9 connector ([`sphere-b2c-connector-2026`](https://github.com/commercetools/sphere-b2c-connector-2026)) so it can
+**Import API**. It's split out of the Sessions 8–9 connector ([`lhc-order-flow-connector`](https://github.com/commercetools/lhc-order-flow-connector)) so it can
 be **installed on its own**, with its own least-privilege API client, on any project.
 
 It is **storefront-agnostic**. It writes prices to the platform, and every client reads them from there.

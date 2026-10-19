@@ -1,6 +1,6 @@
 import { createApiRoot } from '../client/create.client.js';
 import { createImportApiRoot } from '../client/create.import.client.js';
-import { CsvFeedSource, CustomObjectFeedSource, type FeedSource } from '../services/feed.service.js';
+import { CsvFeedSource, CustomObjectFeedSource, type FeedBatch, type FeedSource } from '../services/feed.service.js';
 import { acquireLock } from '../services/lock.service.js';
 import { importPrices, resolveKeys } from '../services/price-import.service.js';
 import { isUnchanged, readLastRun, recordLastRun } from '../services/run-state.service.js';
@@ -58,52 +58,23 @@ export async function runPriceFeed(): Promise<RunOutcome> {
     const feed = await feedSourceFor(config, apiRoot).read();
     for (const r of feed.rejected) logger.error('Feed row rejected', { line: r.line, reason: r.reason, raw: r.raw });
 
-    if (feed.rows.length === 0) {
-      logger.info('Nothing to import', { source: feed.source, rejected: feed.rejected.length, durationMs: Date.now() - started });
-      return feed.rejected.length > 0
-        ? { status: 'failed', reason: 'every row in the feed was rejected', failed: feed.rejected.length }
-        : { status: 'ok', reason: 'nothing to import', imported: 0, failed: 0 };
-    }
+    if (feed.rows.length === 0) return nothingToImport(feed, started);
 
     if (config.skipUnchangedFeed && !config.dryRun) {
-      const last = await readLastRun(apiRoot, config.feedContainer);
-      if (isUnchanged(last, feed.fingerprint)) {
-        logger.info('Skipped: the feed is unchanged since the last successful import', {
-          source: feed.source,
-          lastImportAt: last!.finishedAt,
-        });
-        return { status: 'skipped', reason: 'feed unchanged since the last successful import' };
-      }
+      const unchanged = await skipIfUnchanged(apiRoot, config.feedContainer, feed);
+      if (unchanged) return unchanged;
     }
 
     const keys = await resolveKeys(apiRoot, [...new Set(feed.rows.map((r) => r.sku))]);
 
-    if (config.dryRun) {
-      const unknown = feed.rows.filter((r) => !keys.has(r.sku)).map((r) => r.sku);
-      logger.info('Dry run: nothing submitted', {
-        source: feed.source,
-        rows: feed.rows.length,
-        resolvable: feed.rows.length - unknown.length,
-        unknownSkus: [...new Set(unknown)],
-        rejected: feed.rejected.length,
-      });
-      return {
-        status: unknown.length > 0 || feed.rejected.length > 0 ? 'failed' : 'ok',
-        reason: 'dry run — nothing submitted',
-        failed: unknown.length + feed.rejected.length,
-      };
-    }
+    if (config.dryRun) return dryRunOutcome(feed, keys);
 
     const result = await importPrices(createImportApiRoot(), config.importContainerKey, feed.rows, keys, {
       timeoutSeconds: config.pollTimeoutSeconds,
       intervalSeconds: config.pollIntervalSeconds,
     });
 
-    for (const row of result.rows) {
-      const context = { sku: row.sku, priceKey: row.priceKey, state: row.state, errors: row.errors };
-      if (row.errors.length > 0) logger.error('Row failed', context);
-      else logger.info('Row settled', context);
-    }
+    logSettledRows(result.rows);
     const failed = result.failed + feed.rejected.length;
     logger.info('Price feed finished', {
       source: feed.source,
@@ -127,5 +98,50 @@ export async function runPriceFeed(): Promise<RunOutcome> {
     return { status: failed > 0 ? 'failed' : 'ok', imported: result.imported, failed, pending: result.pending };
   } finally {
     await lock.release();
+  }
+}
+
+function nothingToImport(feed: FeedBatch, started: number): RunOutcome {
+  logger.info('Nothing to import', { source: feed.source, rejected: feed.rejected.length, durationMs: Date.now() - started });
+  return feed.rejected.length > 0
+    ? { status: 'failed', reason: 'every row in the feed was rejected', failed: feed.rejected.length }
+    : { status: 'ok', reason: 'nothing to import', imported: 0, failed: 0 };
+}
+
+async function skipIfUnchanged(
+  apiRoot: ReturnType<typeof createApiRoot>,
+  feedContainer: string,
+  feed: FeedBatch
+): Promise<RunOutcome | undefined> {
+  const last = await readLastRun(apiRoot, feedContainer);
+  if (!isUnchanged(last, feed.fingerprint)) return undefined;
+  logger.info('Skipped: the feed is unchanged since the last successful import', {
+    source: feed.source,
+    lastImportAt: last!.finishedAt,
+  });
+  return { status: 'skipped', reason: 'feed unchanged since the last successful import' };
+}
+
+function dryRunOutcome(feed: FeedBatch, keys: Map<string, unknown>): RunOutcome {
+  const unknown = feed.rows.filter((r) => !keys.has(r.sku)).map((r) => r.sku);
+  logger.info('Dry run: nothing submitted', {
+    source: feed.source,
+    rows: feed.rows.length,
+    resolvable: feed.rows.length - unknown.length,
+    unknownSkus: [...new Set(unknown)],
+    rejected: feed.rejected.length,
+  });
+  return {
+    status: unknown.length > 0 || feed.rejected.length > 0 ? 'failed' : 'ok',
+    reason: 'dry run — nothing submitted',
+    failed: unknown.length + feed.rejected.length,
+  };
+}
+
+function logSettledRows(rows: Array<{ sku: string; priceKey: string; state: string; errors: unknown[] }>): void {
+  for (const row of rows) {
+    const context = { sku: row.sku, priceKey: row.priceKey, state: row.state, errors: row.errors };
+    if (row.errors.length > 0) logger.error('Row failed', context);
+    else logger.info('Row settled', context);
   }
 }

@@ -28,63 +28,92 @@ export class CsvSyntaxError extends Error {
 
 export function parseCsv(text: string, delimiter = ','): CsvDocument {
   const input = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  const rows: CsvRecord[] = [];
-  let cells: string[] = [];
-  let cell = '';
-  let quoted = false;
-  let line = 1;
-  let recordLine = 1;
-  let fieldStarted = false;
-
-  const endCell = () => {
-    cells.push(cell);
-    cell = '';
-    fieldStarted = false;
-  };
-  const endRecord = () => {
-    endCell();
-    // A blank line is one empty cell — skip it rather than report it.
-    if (!(cells.length === 1 && cells[0] === '')) rows.push({ line: recordLine, cells });
-    cells = [];
-  };
-
+  const scanner = new CsvScanner(delimiter);
+  let skipNext = false;
   for (let i = 0; i < input.length; i++) {
-    const ch = input[i]!;
-    if (quoted) {
-      if (ch === '"') {
-        if (input[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        if (ch === '\n') line++;
-        cell += ch;
-      }
+    if (skipNext) {
+      skipNext = false;
       continue;
     }
-    if (ch === '"') {
-      if (fieldStarted && cell !== '') throw new CsvSyntaxError(line, 'a quote inside an unquoted field');
-      quoted = true;
-      fieldStarted = true;
-    } else if (ch === delimiter) {
-      endCell();
-    } else if (ch === '\r' && input[i + 1] === '\n') {
-      // CRLF: let the \n end the record
-    } else if (ch === '\n') {
-      endRecord();
-      line++;
-      recordLine = line;
-    } else {
-      cell += ch;
-      fieldStarted = true;
-    }
+    skipNext = scanner.consume(input[i]!, input[i + 1]);
   }
-  if (quoted) throw new CsvSyntaxError(recordLine, 'an unterminated quoted field');
-  if (cell !== '' || cells.length > 0) endRecord();
-
-  const [head, ...records] = rows;
+  const [head, ...records] = scanner.finish();
   if (!head) return { header: [], records: [] };
   return { header: head.cells.map((h) => h.trim()), records };
+}
+
+/** The RFC 4180 state machine, one character at a time. */
+class CsvScanner {
+  private readonly rows: CsvRecord[] = [];
+  private cells: string[] = [];
+  private cell = '';
+  private quoted = false;
+  private fieldStarted = false;
+  private line = 1;
+  private recordLine = 1;
+
+  constructor(private readonly delimiter: string) {}
+
+  /** Consumes `ch`; returns true when `next` was consumed as well (an escaped quote). */
+  consume(ch: string, next: string | undefined): boolean {
+    return this.quoted ? this.consumeQuoted(ch, next) : this.consumePlain(ch, next);
+  }
+
+  finish(): CsvRecord[] {
+    if (this.quoted) throw new CsvSyntaxError(this.recordLine, 'an unterminated quoted field');
+    if (this.cell !== '' || this.cells.length > 0) this.endRecord();
+    return this.rows;
+  }
+
+  private consumeQuoted(ch: string, next: string | undefined): boolean {
+    if (ch !== '"') {
+      if (ch === '\n') this.line++;
+      this.cell += ch;
+      return false;
+    }
+    if (next === '"') {
+      this.cell += '"';
+      return true;
+    }
+    this.quoted = false;
+    return false;
+  }
+
+  private consumePlain(ch: string, next: string | undefined): boolean {
+    if (ch === '"') this.openQuote();
+    else if (ch === this.delimiter) this.endCell();
+    else if (ch === '\n') this.endLine();
+    else if (!(ch === '\r' && next === '\n')) this.append(ch); // CRLF: let the \n end the record
+    return false;
+  }
+
+  private openQuote(): void {
+    if (this.fieldStarted && this.cell !== '') throw new CsvSyntaxError(this.line, 'a quote inside an unquoted field');
+    this.quoted = true;
+    this.fieldStarted = true;
+  }
+
+  private append(ch: string): void {
+    this.cell += ch;
+    this.fieldStarted = true;
+  }
+
+  private endLine(): void {
+    this.endRecord();
+    this.line++;
+    this.recordLine = this.line;
+  }
+
+  private endCell(): void {
+    this.cells.push(this.cell);
+    this.cell = '';
+    this.fieldStarted = false;
+  }
+
+  private endRecord(): void {
+    this.endCell();
+    // A blank line is one empty cell — skip it rather than report it.
+    if (!(this.cells.length === 1 && this.cells[0] === '')) this.rows.push({ line: this.recordLine, cells: this.cells });
+    this.cells = [];
+  }
 }

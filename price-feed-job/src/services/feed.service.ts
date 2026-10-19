@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { ByProjectKeyRequestBuilder } from '@commercetools/platform-sdk';
 import { logger } from '../utils/logger.utils.js';
-import { parseCsv } from './csv.parser.js';
+import { parseCsv, type CsvRecord } from './csv.parser.js';
 
 /** One row of the nightly price feed, as an ERP would send it. */
 export interface FeedRow {
@@ -54,55 +54,71 @@ export interface FeedSource {
  */
 export function rowsFromCsv(text: string): { rows: FeedRow[]; rejected: RejectedRow[] } {
   const doc = parseCsv(text);
-  const col = indexColumns(doc.header);
-  const missing = ['sku', 'currency'].filter((c) => col[c] === undefined);
-  if (col.amount === undefined && col.centAmount === undefined) missing.push('amount (or centAmount)');
-  if (missing.length) {
-    throw new Error(`The feed's header row is missing: ${missing.join(', ')} (found: ${doc.header.join(', ') || 'nothing'})`);
-  }
-
+  const col = requireColumns(doc.header);
   const rows: FeedRow[] = [];
   const rejected: RejectedRow[] = [];
   const lineByKey = new Map<string, number>();
 
   for (const record of doc.records) {
-    const get = (name: string) => (col[name] === undefined ? '' : (record.cells[col[name]!] ?? '').trim());
-    const raw = record.cells.join(',');
-    const reject = (reason: string) => rejected.push({ line: record.line, reason, raw });
-
-    const sku = get('sku');
-    const currencyCode = get('currency').toUpperCase();
-    const country = get('country').toUpperCase();
-    if (!sku) { reject('sku is empty'); continue; }
-    if (!/^[A-Z]{3}$/.test(currencyCode)) { reject(`currency "${currencyCode}" is not an ISO 4217 code`); continue; }
-    if (country && !/^[A-Z]{2}$/.test(country)) { reject(`country "${country}" is not an ISO 3166-1 alpha-2 code`); continue; }
-
-    let centAmount: number | null;
-    if (col.centAmount !== undefined && get('centAmount') !== '') {
-      const v = get('centAmount');
-      centAmount = /^\d+$/.test(v) ? Number(v) : null;
-      if (centAmount === null) { reject(`centAmount "${v}" is not a non-negative integer`); continue; }
-    } else {
-      const v = get('amount');
-      centAmount = decimalToCents(v, currencyCode);
-      if (centAmount === null) {
-        reject(`amount "${v}" is not a decimal with at most ${fractionDigits(currencyCode)} fraction digits`);
-        continue;
-      }
+    const parsed = parseFeedRecord(record, col);
+    if (typeof parsed === 'string') {
+      rejected.push({ line: record.line, reason: parsed, raw: record.cells.join(',') });
+      continue;
     }
-
-    const row: FeedRow = { sku, currencyCode, centAmount, ...(country ? { country } : {}) };
-    const key = priceKeyFor(row);
-    const earlier = lineByKey.get(key);
-    if (earlier !== undefined) {
-      // Same price twice in one file: the later line wins, as it would in the ERP. Not a failure.
-      logger.warn('Duplicate price in the feed — the later line wins', { priceKey: key, line: record.line, supersedes: earlier });
-      rows.splice(rows.findIndex((r) => priceKeyFor(r) === key), 1);
-    }
-    lineByKey.set(key, record.line);
-    rows.push(row);
+    addRow(rows, lineByKey, parsed, record.line);
   }
   return { rows, rejected };
+}
+
+type Columns = Record<string, number | undefined>;
+
+function requireColumns(header: string[]): Columns {
+  const col = indexColumns(header);
+  const missing = ['sku', 'currency'].filter((c) => col[c] === undefined);
+  if (col.amount === undefined && col.centAmount === undefined) missing.push('amount (or centAmount)');
+  if (missing.length) {
+    throw new Error(`The feed's header row is missing: ${missing.join(', ')} (found: ${header.join(', ') || 'nothing'})`);
+  }
+  return col;
+}
+
+/** One record → a FeedRow, or the reason it is rejected. */
+function parseFeedRecord(record: CsvRecord, col: Columns): FeedRow | string {
+  const get = (name: string) => (col[name] === undefined ? '' : (record.cells[col[name]!] ?? '').trim());
+  const sku = get('sku');
+  const currencyCode = get('currency').toUpperCase();
+  const country = get('country').toUpperCase();
+  if (!sku) return 'sku is empty';
+  if (!/^[A-Z]{3}$/.test(currencyCode)) return `currency "${currencyCode}" is not an ISO 4217 code`;
+  if (country && !/^[A-Z]{2}$/.test(country)) return `country "${country}" is not an ISO 3166-1 alpha-2 code`;
+
+  const centAmount = parseCents(get, col, currencyCode);
+  if (typeof centAmount === 'string') return centAmount;
+  return { sku, currencyCode, centAmount, ...(country ? { country } : {}) };
+}
+
+function parseCents(get: (name: string) => string, col: Columns, currencyCode: string): number | string {
+  if (col.centAmount !== undefined && get('centAmount') !== '') {
+    const v = get('centAmount');
+    return /^\d+$/.test(v) ? Number(v) : `centAmount "${v}" is not a non-negative integer`;
+  }
+  const v = get('amount');
+  const cents = decimalToCents(v, currencyCode);
+  return cents === null
+    ? `amount "${v}" is not a decimal with at most ${fractionDigits(currencyCode)} fraction digits`
+    : cents;
+}
+
+function addRow(rows: FeedRow[], lineByKey: Map<string, number>, row: FeedRow, line: number): void {
+  const key = priceKeyFor(row);
+  const earlier = lineByKey.get(key);
+  if (earlier !== undefined) {
+    // Same price twice in one file: the later line wins, as it would in the ERP. Not a failure.
+    logger.warn('Duplicate price in the feed — the later line wins', { priceKey: key, line, supersedes: earlier });
+    rows.splice(rows.findIndex((r) => priceKeyFor(r) === key), 1);
+  }
+  lineByKey.set(key, line);
+  rows.push(row);
 }
 
 function indexColumns(header: string[]): Record<string, number | undefined> {
